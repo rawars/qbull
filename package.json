@@ -1,0 +1,16 @@
+{
+  "name": "qbull",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Simple group queue library.",
+  "main": "index.js",
+  "scripts": {
+    "dev": "nodemon index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "ioredis": "^5.4.1"
+  }
+}
