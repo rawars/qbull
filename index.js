@@ -1,8 +1,6 @@
 // index.js
 import { Queue } from './queue.js';
 
-
-
 const queue = new Queue(
     {
         host: '192.168.49.2',
@@ -11,7 +9,7 @@ const queue = new Queue(
     },
     {
         inactivityTimeout: 5000,       // Tiempo de inactividad de 20 segundos
-        maxActiveConsumers: 1          // Límite de 2 consumidores activos simultáneamente
+        maxActiveConsumers: 5          // Límite de 2 consumidores activos simultáneamente
     }
 );
 
