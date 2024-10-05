@@ -7,10 +7,20 @@
   "scripts": {
     "dev": "nodemon index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "redis queues",
+    "queues",
+    "group processing"
+  ],
+  "author": {
+    "name": "Rafael Jose Garcia Suarez",
+    "email": "tuemail@example.com"
+  },
+  "license": "MIT",
   "dependencies": {
     "ioredis": "^5.4.1"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
   }
 }
