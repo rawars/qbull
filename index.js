@@ -1,6 +1,6 @@
-// Ejemplo de soporte para batches en poolQueue.js
-// Se define un método addBatch para agregar varios trabajos con un mismo batchId
-// y emitir un evento cuando todos estén completados.
+// Solo necesitas quitar las referencias a this.enqueueShaPromise, this.dequeueShaPromise, etc.,
+// y usar las propiedades this.enqueueSha, this.dequeueSha, this.updateStatusSha, etc.
+// Además de asegurarte de hacer await this.scriptsLoaded antes de usarlas, así:
 
 import { createPool } from 'generic-pool';
 import Redis from 'ioredis';
@@ -14,6 +14,11 @@ import { v4 as uuidv4 } from 'uuid';
 export class Queue extends EventEmitter {
     constructor(redisConfig, options = {}) {
         super();
+
+        this.publisher = new Redis(redisConfig);
+        this.subscriber = new Redis(redisConfig);
+
+        this.subscribeToNewJobs();
 
         this.jobEvents$ = new Subject();
         const poolSize = options.poolSize || 5;
@@ -42,82 +47,113 @@ export class Queue extends EventEmitter {
         this.updateStatusScript = fs.readFileSync(path.join(__dirname, 'update_status.lua'), 'utf8');
         this.getStatusScript = fs.readFileSync(path.join(__dirname, 'get_status.lua'), 'utf8');
 
-        this.enqueueShaPromise = this.loadScript(this.enqueueScript);
-        this.dequeueShaPromise = this.loadScript(this.dequeueScript);
-        this.updateStatusShaPromise = this.loadScript(this.updateStatusScript);
-        this.getStatusShaPromise = this.loadScript(this.getStatusScript);
+        this.batchStatus = new Map();
 
-        // Para rastrear el conteo de trabajos de cada batch
-        this.batchStatus = new Map(); // batchId -> { total, completed }
+        // Cargar scripts y asignarlos a propiedades
+        this.scriptsLoaded = (async () => {
+            const client = await this.pool.acquire();
+            try {
+                this.enqueueSha = await client.script('LOAD', this.enqueueScript);
+                this.dequeueSha = await client.script('LOAD', this.dequeueScript);
+                this.updateStatusSha = await client.script('LOAD', this.updateStatusScript);
+                this.getStatusSha = await client.script('LOAD', this.getStatusScript);
+            } finally {
+                this.pool.release(client);
+            }
+        })();
+
+        // Verificar trabajos pendientes al iniciar
+        this.checkPendingJobs();
+
+    }
+
+    async checkPendingJobs() {
+        await this.scriptsLoaded;
+        const client = await this.pool.acquire();
+        try {
+            const queues = await client.keys('queue:*:groups');
+            for (const queueKey of queues) {
+                const queueName = queueKey.split(':')[1];
+                const groups = await client.smembers(queueKey);
+                for (const groupName of groups) {
+                    const groupKey = `queue:${queueName}:group:${groupName}`;
+                    const jobCount = await client.llen(groupKey);
+                    if (jobCount > 0) {
+                        this.startGroupConsumer(queueName, groupName);
+                    }
+                }
+            }
+        } finally {
+            this.pool.release(client);
+        }
+    }
+
+    subscribeToNewJobs() {
+        this.subscriber.subscribe('queue:new_job', (err) => {
+            if (err) console.error('Error al suscribirse:', err);
+        });
+        this.subscriber.on('message', (channel, message) => {
+            if (channel === 'queue:new_job') {
+                const { queueName, groupName } = JSON.parse(message);
+                if (this.processFunctions.has(queueName)) {
+                    this.startGroupConsumer(queueName, groupName);
+                }
+            }
+        });
     }
 
     getJobEvents() {
         return this.jobEvents$.asObservable();
     }
 
-    async loadScript(script) {
+    async process(queueName, processFunction) {
+        await this.scriptsLoaded;
+        this.processFunctions.set(queueName, processFunction);
+
         const client = await this.pool.acquire();
+
         try {
-            const sha = await client.script('LOAD', script);
-            return sha;
+            const groups = await client.smembers(`queue:${queueName}:groups`);
+            groups.forEach(groupName => {
+                if (groupName.startsWith(`queue:${queueName}:group:`)) {
+                    groupName = groupName.split(`queue:${queueName}:group:`)[1];
+                }
+                this.startGroupConsumer(queueName, groupName);
+            });
         } finally {
             this.pool.release(client);
         }
     }
 
-    process(queueName, processFunction) {
-        console.log(`✔ Registrando función de proceso para ${queueName}`);
-        this.processFunctions.set(queueName, processFunction);
-
-        // 🔥 Forzar inicio de consumidores al momento de registrar el proceso
-        this.pool.acquire().then(async (client) => {
-            const groups = await client.smembers(`queue:${queueName}:groups`);
-            console.log(`🔍 Grupos en la cola: ${groups}`);
-            groups.forEach(groupName => {
-                console.log(`🚀 Iniciando consumidor automáticamente para grupo: ${groupName}`);
-                this.startGroupConsumer(queueName, groupName);
-            });
-            this.pool.release(client);
-        }).catch(err => console.error("❌ Error obteniendo grupos:", err));
-    }
-
-    // Agregar un solo trabajo
     async add(queueName, groupName, jobData) {
-        console.log(`Añadiendo trabajo: ${JSON.stringify(jobData)} a la cola: ${queueName}, grupo: ${groupName}`);
-
-        const sha = await this.enqueueShaPromise;
+        // Asegúrate de esperar a que se carguen los scripts
+        await this.scriptsLoaded;
         const client = await this.pool.acquire();
         try {
             const queueKey = `queue:${queueName}:groups`;
             const groupKey = `queue:${queueName}:group:${groupName}`;
+            // Usa la propiedad this.enqueueSha en lugar de this.enqueueShaPromise
             const jobId = await client.evalsha(
-                sha,
+                this.enqueueSha,
                 2,
                 queueKey,
                 groupKey,
                 JSON.stringify(jobData),
                 groupName
             );
-            this.startGroupConsumer(queueName, groupName);
+            await this.publisher.publish('queue:new_job', JSON.stringify({ queueName, groupName }));
             return jobId;
         } finally {
             this.pool.release(client);
         }
     }
 
-    // Agregar varios trabajos como un batch
     async addBatch(queueName, groupName, jobsData) {
-        const batchId = uuidv4(); // Generar un ID único para el batch
-        // Registrar cuántos trabajos en total tiene el batch
+        const batchId = uuidv4();
         this.batchStatus.set(batchId, { total: jobsData.length, completed: 0 });
 
-        // Agregar cada trabajo con info de batchId
         const promises = jobsData.map(async (data) => {
-            const jobDataConBatch = {
-                ...data,
-                batchId
-            };
-            return this.add(queueName, groupName, jobDataConBatch);
+            return this.add(queueName, groupName, { ...data, batchId });
         });
         return { batchId, jobIds: await Promise.all(promises) };
     }
@@ -142,34 +178,23 @@ export class Queue extends EventEmitter {
     }
 
     async groupWorker(queueName, groupName, groupKey) {
-        console.log(`Iniciando worker para grupo ${groupName}`);
-
-        const dequeueSha = await this.dequeueShaPromise;
-        const processFunction = this.processFunctions.get(queueName);
-        if (!processFunction) {
-            console.log(`No hay función de proceso para ${queueName}`);
-            return;
-        }
-        const consumerKey = `${queueName}:${groupName}`;
-
+        await this.scriptsLoaded;
         while (true) {
             let redisClient;
             try {
                 redisClient = await this.pool.acquire();
-                const result = await redisClient.evalsha(dequeueSha, 1, groupKey);
+                const result = await redisClient.evalsha(this.dequeueSha, 1, groupKey);
                 if (result) {
                     this.resetGroupConsumerTimer(queueName, groupName);
                     const [jobId, jobDataRaw, groupNameFromJob] = result;
-                    const jobDataString = jobDataRaw ? jobDataRaw.toString() : null;
-                    const jobDataParsed = jobDataString ? JSON.parse(jobDataString) : null;
-                    const groupNameStr = groupNameFromJob ? groupNameFromJob.toString() : undefined;
+                    const jobDataParsed = jobDataRaw ? JSON.parse(jobDataRaw) : null;
                     const job = {
                         id: jobId,
                         data: jobDataParsed,
-                        groupName: groupNameStr,
+                        groupName: groupNameFromJob ? groupNameFromJob.toString() : undefined,
                         progress: (value) => this.updateProgress(jobId, value)
                     };
-                    await this.processJob(queueName, job, processFunction);
+                    await this.processJob(queueName, job, this.processFunctions.get(queueName));
                 } else {
                     const shouldStop = await this.checkGroupConsumerInactivity(queueName, groupName);
                     if (shouldStop) {
@@ -179,7 +204,7 @@ export class Queue extends EventEmitter {
                         await new Promise((r) => setTimeout(r, 1000));
                     }
                 }
-            } catch (_) {
+            } catch (error) {
                 await new Promise((r) => setTimeout(r, 1000));
             } finally {
                 if (redisClient) this.pool.release(redisClient);
@@ -231,22 +256,16 @@ export class Queue extends EventEmitter {
         }
     }
 
-    // Verificar si un batch se ha completado
     checkBatchCompletion(batchId) {
         if (!batchId) return;
         const batchInfo = this.batchStatus.get(batchId);
         if (!batchInfo) return;
 
         batchInfo.completed += 1;
-        // Si el total de completados iguala el total de trabajos, emitimos batchCompleted
         if (batchInfo.completed >= batchInfo.total) {
-            this.jobEvents$.next({
-                type: 'batchCompleted',
-                batchId
-            });
+            this.jobEvents$.next({ type: 'batchCompleted', batchId });
             this.batchStatus.delete(batchId);
         } else {
-            // Opcional: emitir un evento de “batchProgress” si quieres monitorear cuántos completados van
             this.jobEvents$.next({
                 type: 'batchProgress',
                 batchId,
@@ -268,14 +287,15 @@ export class Queue extends EventEmitter {
     }
 
     async updateJobStatus(jobId, newStatus) {
-        const sha = await this.updateStatusShaPromise;
+        // Espera a que se carguen los scripts y usa this.updateStatusSha
+        await this.scriptsLoaded;
         let client;
         try {
             client = await this.pool.acquire();
-            await client.evalsha(sha, 0, jobId, newStatus);
+            await client.evalsha(this.updateStatusSha, 0, jobId, newStatus);
             this.emit(newStatus, jobId);
         } finally {
-            if (client) this.pool.release(client);
+            this.pool.release(client);
         }
     }
 

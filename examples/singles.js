@@ -29,6 +29,8 @@ import QUEUE from './queue.js';
     QUEUE.process('WHATSAPP', async (job, done) => {
         try {
             logger.info(`Procesando trabajo ${job.id} (grupo: ${job.groupName})`);
+            console.log(job.data)
+            
             await new Promise(resolve => setTimeout(resolve, job.data.sleep || 1000));
             job.progress(50);
             await new Promise(resolve => setTimeout(resolve, 2000));
