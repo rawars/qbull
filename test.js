@@ -44,21 +44,10 @@ queue.process('WHATSAPP', async function (job, done) {
 
 // Ejemplo de uso mixto:
 // 1) Agregar trabajos individuales
-/*
+
 queue.add('WHATSAPP', '573205108541', { message: 'Hola, usuario 1', sleep: 5000 });
 queue.add('WHATSAPP', '573205108541', { message: 'Hola, usuario 1 - segundo mensaje', sleep: 0 });
 queue.add('WHATSAPP', '573205108542', { message: 'Hola, usuario 2', sleep: 5000 });
-*/
-
-// 2) Agregar un batch de trabajos
-(async () => {
-    const { batchId, jobIds } = await queue.addBatch('WHATSAPP', '573205108543', [
-        { message: 'Batch msg 1', sleep: 1000 },
-        { message: 'Batch msg 2', sleep: 3000 },
-        { message: 'Batch msg 3', sleep: 2000 }
-    ]);
-    logger.info({ batchId, jobIds }, 'Batch creado');
-})();
 
 // Detener el procesamiento tras 30s
 setTimeout(() => {

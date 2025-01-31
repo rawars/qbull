@@ -66,25 +66,11 @@ export class Queue extends EventEmitter {
     }
 
     process(queueName, processFunction) {
-        console.log(`✔ Registrando función de proceso para ${queueName}`);
         this.processFunctions.set(queueName, processFunction);
-
-        // 🔥 Forzar inicio de consumidores al momento de registrar el proceso
-        this.pool.acquire().then(async (client) => {
-            const groups = await client.smembers(`queue:${queueName}:groups`);
-            console.log(`🔍 Grupos en la cola: ${groups}`);
-            groups.forEach(groupName => {
-                console.log(`🚀 Iniciando consumidor automáticamente para grupo: ${groupName}`);
-                this.startGroupConsumer(queueName, groupName);
-            });
-            this.pool.release(client);
-        }).catch(err => console.error("❌ Error obteniendo grupos:", err));
     }
 
     // Agregar un solo trabajo
     async add(queueName, groupName, jobData) {
-        console.log(`Añadiendo trabajo: ${JSON.stringify(jobData)} a la cola: ${queueName}, grupo: ${groupName}`);
-
         const sha = await this.enqueueShaPromise;
         const client = await this.pool.acquire();
         try {
@@ -142,14 +128,9 @@ export class Queue extends EventEmitter {
     }
 
     async groupWorker(queueName, groupName, groupKey) {
-        console.log(`Iniciando worker para grupo ${groupName}`);
-
         const dequeueSha = await this.dequeueShaPromise;
         const processFunction = this.processFunctions.get(queueName);
-        if (!processFunction) {
-            console.log(`No hay función de proceso para ${queueName}`);
-            return;
-        }
+        if (!processFunction) return;
         const consumerKey = `${queueName}:${groupName}`;
 
         while (true) {
