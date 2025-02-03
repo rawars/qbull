@@ -1,6 +1,6 @@
 {
   "name": "@rawars/qbull",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "description": "Simple group queue library.",
   "main": "index.js",
